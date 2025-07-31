@@ -136,7 +136,7 @@ def get_vivado_bin(target_version: str, download_dir: str, timeout: float = 20):
             versions_dict[version] = elem
             if not highest_version or version > highest_version:
                 highest_version = version
-        elif elem.text.lower() == "vivado archive":
+        elif "archive" in elem.text.lower() and not archive_href: # Consider first archive tab
             archive_href = elem
 
     if target_version > highest_version:
