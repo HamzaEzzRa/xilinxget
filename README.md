@@ -1,5 +1,5 @@
-# Vivado Download Crawler
-Python script to automate the process of downloading specific versions of Vivado/Vitis binaries from the AMD Xilinx website, without the need of a GUI. This script takes care of finding the specified version, signing in, filling necessary information and saving the files locally.
+# Xilinx Download Crawler
+Python script to automate the process of downloading tools from the AMD Xilinx website, without the need of a GUI. This script takes care of finding a specific tool/version, signing in, filling necessary information and saving the files locally.
 
 ## Prerequisites
 **This was tested on Ubuntu 20.04, using Python 3.10.5**
@@ -22,19 +22,18 @@ pip install selenium webdriver-manager
 ```
 
 ## Usage
-Once the prerequisites are installed, you can run the script to automatically download the specified version of Vivado binaries.
+Once the prerequisites are installed, you can run the script to choose and download a specific version of a tool.
 
 ### Command-line Usage
-Run the script from the terminal with the following options:
+You can simply run the script from a terminal to choose from all available tools and versions:
 ```python
-python main.py -v <vivado_version> [-o <output_directory>, -t <timeout>]
+python main.py
 ```
 
-### Example
+You can pass more options for an advanced usage. Please check using "-h" option for further details:
 ```python
-python main.py -v 2024.1 -o /home
+python main.py -h
 ```
-This will download Vivado version 2024.1 and store the files in /home. If you do not specify an output directory, the script defaults to downloading the files to $HOME.
 
 ## License
 This project is licensed under the MIT License. See the LICENSE file for details.
