@@ -1,22 +1,61 @@
 import argparse
 import os
 import re
+import shutil
+import sys
 import time
 from getpass import getpass
 from pathlib import Path
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options as ChromeOptions
-from selenium.webdriver.chrome.service import Service as ChromeService
+import undetected_chromedriver as uc
+from pyvirtualdisplay import Display
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select, WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
 
-from pager import pager_print
+from xilinxget.behavior import (
+    dismiss_cookie_notice,
+    human_click,
+    human_select,
+    human_type,
+)
+from xilinxget.pager import pager_print
 
-global g_driver
+# WSL2 fix for Xvfb, see https://stackoverflow.com/questions/76047637
+if (
+    os.path.exists("/proc/version")
+    and "microsoft" in open("/proc/version").read().lower()
+):
+    os.environ["PYVIRTUALDISPLAY_DISPLAYFD"] = "0"
+
+global g_driver, g_display
 g_driver = None
+g_display = None
+
+_CHROME_BINARIES = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
+
+
+def check_system_dependencies(headless: bool = True):
+    missing = []
+
+    if not any(shutil.which(b) for b in _CHROME_BINARIES):
+        missing.append(
+            "Chrome/Chromium not found.\n"
+            "  Install with:  sudo apt install google-chrome-stable\n"
+            "  or:            sudo apt install chromium-browser"
+        )
+
+    if headless and sys.platform == "linux" and not shutil.which("Xvfb"):
+        missing.append(
+            "Xvfb not found (required for headless mode on Linux).\n"
+            "  Install with:  sudo apt install xvfb"
+        )
+
+    if missing:
+        print("Missing system dependencies:\n")
+        for msg in missing:
+            print(f"  - {msg}\n")
+        sys.exit(1)
 
 
 class SoftwareVersion:
@@ -99,18 +138,26 @@ def format_tool_name(name: str):
 
 
 def get_chrome_driver(download_dir: str = "", headless: bool = True):
-    global g_driver
+    global g_driver, g_display
     if not g_driver:
-        chrome_options = ChromeOptions()
-        if headless:
-            chrome_options.add_argument("--headless")
+        if headless and sys.platform == "linux":
+            try:
+                g_display = Display(backend="xvfb", visible=False, size=(1920, 1080))
+                g_display.start()
+                headless = False  # Chrome runs non-headless against the virtual display
+            except Exception as e:
+                g_display = None
+                print(f"Warning: failed to start Xvfb on display with error: {e}")
+            if headless:
+                print("Warning: could not start Xvfb, falling back to --headless=new.")
 
-        # Set user-agent to mimic a regular browser and disable webdriver flag to prevent detection of headless mode
-        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options = uc.ChromeOptions()
+        if headless:  # Windows / macOS fallback
+            chrome_options.add_argument("--headless=new")
 
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--window-size=1920,1080")
 
         prefs = {
             "download.prompt_for_download": False,
@@ -127,7 +174,17 @@ def get_chrome_driver(download_dir: str = "", headless: bool = True):
             prefs["download.default_directory"] = download_dir
 
         chrome_options.add_experimental_option("prefs", prefs)
-        g_driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=chrome_options)
+        g_driver = uc.Chrome(options=chrome_options, headless=False)
+
+        # Patch remaining headless-detectable JS properties
+        g_driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": """
+            Object.defineProperty(window, 'outerWidth',  {get: () => window.innerWidth});
+            Object.defineProperty(window, 'outerHeight', {get: () => window.innerHeight + 88});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+            document.hasFocus = () => true;
+            if (!window.chrome) window.chrome = {};
+            if (!window.chrome.runtime) window.chrome.runtime = {};
+        """})
 
 
 def list_xilinx_tools(timeout: float, **kwargs):
@@ -138,6 +195,7 @@ def list_xilinx_tools(timeout: float, **kwargs):
     available_categories = WebDriverWait(g_driver, timeout).until(
         EC.presence_of_all_elements_located((By.XPATH, "//div[contains(@class, \"xilinxTabs\")]/ul[contains(@class, \"nav\")]/descendant::a"))
     )
+    dismiss_cookie_notice(g_driver)
     return available_categories
 
 
@@ -272,7 +330,7 @@ def get_xilinx_tool(target_tool, target_version, download_dir: str, timeout: flo
     download_divs = downloadable_content.find_elements(By.XPATH, "descendant::div[contains(@class, \"xilinxDCDownloadGroup\")]")
     collapsed_versions = downloadable_content.find_elements(By.XPATH, "descendant::button[contains(@data-toggle, \"collapse\")]")
     for collapsed in collapsed_versions:
-        g_driver.execute_script("arguments[0].click();", collapsed)
+        human_click(g_driver, collapsed)
         WebDriverWait(g_driver, timeout).until(lambda driver: collapsed.get_attribute("aria-expanded") == "true")
         if collapsed.text.lower().strip() == target_version.lower().strip():
             download_divs = collapsed.find_elements(By.XPATH, "parent::div/following-sibling::div/descendant::div[contains(@class, \"xilinxDCDownloadGroup\")]")
@@ -344,14 +402,12 @@ def get_xilinx_tool(target_tool, target_version, download_dir: str, timeout: flo
         while True:
             print("=" * 120)
             email = str(input("Email: "))
-            email_input.clear()
-            email_input.send_keys(email)
+            human_type(g_driver, email_input, email)
 
             pwd = getpass("Password: ")
-            pwd_input.clear()
-            pwd_input.send_keys(pwd)
+            human_type(g_driver, pwd_input, pwd)
 
-            g_driver.execute_script("arguments[0].click();", submit_btn)
+            human_click(g_driver, submit_btn)
             WebDriverWait(g_driver, timeout).until(
                 lambda driver: driver.current_url != current_url \
                 or EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, \"error\") or contains(@class, \"Error\") or contains(@class, \"ERROR\")]"))(driver)
@@ -364,25 +420,24 @@ def get_xilinx_tool(target_tool, target_version, download_dir: str, timeout: flo
                 break
 
     additional_inputs = {
-        "First Name": (WebDriverWait(g_driver, timeout).until(EC.presence_of_element_located((By.XPATH, "//input[@name=\"First_Name\"]"))), False), # second element is a flag for optional fields
+        "First Name": (WebDriverWait(g_driver, timeout).until(EC.presence_of_element_located((By.XPATH, "//input[@name=\"First_Name\"]"))), False),  # second element is a flag for optional fields
         "Last Name": (g_driver.find_element(By.XPATH, "//input[@name=\"Last_Name\"]"), False),
         "Company": (g_driver.find_element(By.XPATH, "//input[@name=\"Company\"]"), False),
         "Address 1": (g_driver.find_element(By.XPATH, "//input[@name=\"Address_1\"]"), False),
         "Address 2": (g_driver.find_element(By.XPATH, "//input[@name=\"Address_2\"]"), True),
         "Location": (Select(g_driver.find_element(By.XPATH, "//select[@name=\"Country\"]")), False),
-        "State/Province": (g_driver.find_element(By.XPATH, "//input[@name=\"State\"]"), True), # There are special cases where it's required for some countries, updated depending on the location
+        "State/Province": (g_driver.find_element(By.XPATH, "//input[@name=\"State\"]"), True),  # There are special cases where it's required for some countries, updated depending on the location
         "City": (g_driver.find_element(By.XPATH, "//input[@name=\"City\"]"), False),
         "Postal Code": (g_driver.find_element(By.XPATH, "//input[@name=\"Zip_Code\"]"), True),
         "Phone": (g_driver.find_element(By.XPATH, "//input[@name=\"Phone\"]"), True),
         "Job Function": (Select(g_driver.find_element(By.XPATH, "//select[@name=\"Job_Function\"]")), False)
     }
+    dismiss_cookie_notice(g_driver)
 
-    info_message = """
-Additional information is required for the download ...
-US Government Export Approval:
-- U.S. export regulations require that your First Name, Last Name, Company Name and Shipping Address be verified before AMD can fulfill your download request. Please provide accurate and complete information.
-- Addresses with Post Office Boxes and names/addresses with Non-Roman Characters with accents such as grave, tilde or colon are not supported by US export compliance systems.
-    """.strip()
+    info_toast = g_driver.find_element(By.XPATH, "//div[@class=\"cmp-toast\"]")
+    info_message = info_toast.get_attribute("textContent").strip()
+    info_message = "\n\n".join([line.strip() for line in info_message.splitlines() if line.strip()])
+    print("=" * 120)
     pager_print(info_message)
 
     current_url = g_driver.current_url
@@ -415,7 +470,7 @@ US Government Export Approval:
                     if not response and previous_value and previous_value.strip():
                         break
                     if response.isdigit() and int(response) in range(1, len(options) + 1):
-                        elem.select_by_index(int(response))
+                        human_select(g_driver, elem, index=int(response))
                         break
 
                 if key == "Location":
@@ -435,11 +490,10 @@ US Government Export Approval:
                     if not response and ((previous_value and previous_value.strip()) or optional):
                         break
                     if response:
-                        elem.clear()
-                        elem.send_keys(response)
-                        break                 
+                        human_type(g_driver, elem, response)
+                        break
 
-        g_driver.execute_script("arguments[0].click();", submit_btn)
+        human_click(g_driver, submit_btn)
         WebDriverWait(g_driver, timeout).until(
             lambda driver: get_download_progress(download_dir, filename, size_in_bytes) > 0 \
             or WebDriverWait.until(EC.visibility_of_element_located((By.XPATH, "//div[contains(@id, \"Error\") or contains(@id, \"error\") or contains(@id, \"ERROR\")]"))(driver))
@@ -473,8 +527,21 @@ US Government Export Approval:
     input("Press Enter to exit ...")
 
 
-def main(args):
-    get_chrome_driver(args.output, headless=True)
+def main():
+    home_dir = os.path.expanduser("~")
+
+    parser = argparse.ArgumentParser(description="Automated download script for Xilinx tools.")
+    parser.add_argument("-t", "--tool", default="", help="Specify the tool to download (e.g., vivado, vitis, petalinux, etc.)")
+    parser.add_argument("-v", "--version", default="", help="Specify the version of the tool (e.g., 2024.1)")
+    parser.add_argument("-o", "--output", default=home_dir, help=f"Specify the download output directory (default: {home_dir})")
+    parser.add_argument("-ti", "--timeout", default=40, type=float, help="Specify the timeout in seconds for each web request (default: 20)")
+    parser.add_argument("-lt", "--list-tools", action="store_true", help="List all available tools and versions")
+    parser.add_argument("--describe", action="store_true", help="Print downloadable files descriptions")
+    parser.add_argument("--visible", action="store_true", help="Run with visible browser for debugging purposes")
+    args = parser.parse_args()
+
+    check_system_dependencies(headless=not args.visible)
+    get_chrome_driver(args.output, headless=not args.visible)
 
     if args.list_tools:
         tools = list_xilinx_tools(args.timeout)
@@ -512,22 +579,14 @@ def main(args):
     else:
         get_xilinx_tool(args.tool, args.version, args.output, timeout=args.timeout, describe=args.describe)
 
-    global g_driver
+    global g_driver, g_display
     if g_driver:
         g_driver.quit()
         g_driver = None
+    if g_display:
+        g_display.stop()
+        g_display = None
 
 
 if __name__ == "__main__":
-    home_dir = os.path.expanduser("~")
-
-    parser = argparse.ArgumentParser(description="Automated download script for Xilinx tools.")
-    parser.add_argument("-t", "--tool", default="", help="Specify the tool to download (e.g., vivado, vitis, petalinux, etc.)")
-    parser.add_argument("-v", "--version", default="", help="Specify the version of the tool (e.g., 2024.1)")
-    parser.add_argument("-o", "--output", default=home_dir, help=f"Specify the download output directory (default: {home_dir})")
-    parser.add_argument("-ti", "--timeout", default=20, type=float, help="Specify the timeout in seconds for each web request (default: 20)")
-    parser.add_argument("-lt", "--list-tools", action="store_true", help="List all available tools and versions")
-    parser.add_argument("--describe", action="store_true", help="Print downloadable files descriptions")
-
-    args = parser.parse_args()
-    main(args)
+    main()
