@@ -331,9 +331,24 @@ def get_xilinx_tool(target_tool, target_version, download_dir: str, timeout: flo
 
     download_divs = downloadable_content.find_elements(By.XPATH, "descendant::div[contains(@class, \"xilinxDCDownloadGroup\")]")
     collapsed_versions = downloadable_content.find_elements(By.XPATH, "descendant::button[contains(@data-toggle, \"collapse\")]")
-    for collapsed in collapsed_versions:
-        human_click(g_driver, collapsed)
-        WebDriverWait(g_driver, timeout).until(lambda driver: collapsed.get_attribute("aria-expanded") == "true")
+    collapsed_labels = [collapsed.text.strip() for collapsed in collapsed_versions]
+    for collapsed_label in collapsed_labels:
+        collapsed = next(
+            (
+                button for button in downloadable_content.find_elements(
+                    By.XPATH, "descendant::button[contains(@data-toggle, \"collapse\")]"
+                )
+                if button.text.strip() == collapsed_label
+            ),
+            None,
+        )
+        if collapsed is None:
+            continue
+
+        if collapsed.get_attribute("aria-expanded") != "true":
+            human_click(g_driver, collapsed)
+            WebDriverWait(g_driver, timeout).until(lambda driver: collapsed.get_attribute("aria-expanded") == "true")
+
         if collapsed.text.lower().strip() == target_version.lower().strip():
             download_divs = collapsed.find_elements(By.XPATH, "parent::div/following-sibling::div/descendant::div[contains(@class, \"xilinxDCDownloadGroup\")]")
             break
